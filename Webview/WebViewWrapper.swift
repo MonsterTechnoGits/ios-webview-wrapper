@@ -32,6 +32,7 @@ struct WebViewWrapper: UIViewRepresentable {
         context.coordinator.handlePendingCommandIfNeeded(webView)
     }
 
+    @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate, UIDocumentPickerDelegate {
         private let store: WebViewStore
         private let config: WebWrapperConfig
@@ -80,20 +81,22 @@ struct WebViewWrapper: UIViewRepresentable {
 
         func handlePendingCommandIfNeeded(_ webView: WKWebView) {
             guard store.commandVersion > handledCommandVersion else { return }
-            handledCommandVersion = store.commandVersion
-            guard let command = store.pendingCommand else { return }
-
-            switch command {
-            case let .load(url):
-                webView.load(URLRequest(url: url))
-            case .goBack:
-                if webView.canGoBack { webView.goBack() }
-            case .goForward:
-                if webView.canGoForward { webView.goForward() }
-            case .reload:
-                webView.reload()
-            case let .emitEvent(name, payload):
-                emitEventToWeb(name: name, payload: payload)
+            let currentVersion = store.commandVersion
+            let commands = store.dequeuePendingCommands()
+            handledCommandVersion = currentVersion
+            for command in commands {
+                switch command {
+                case let .load(url):
+                    webView.load(URLRequest(url: url))
+                case .goBack:
+                    if webView.canGoBack { webView.goBack() }
+                case .goForward:
+                    if webView.canGoForward { webView.goForward() }
+                case .reload:
+                    webView.reload()
+                case let .emitEvent(name, payload):
+                    emitEventToWeb(name: name, payload: payload)
+                }
             }
         }
 
@@ -277,7 +280,9 @@ struct WebViewWrapper: UIViewRepresentable {
                 guard let key = request.payload?["key"] else {
                     return BridgeResponse(id: request.id, success: false, result: nil, error: "Missing key")
                 }
-                let value = storage.get(forKey: key) ?? ""
+                guard let value = storage.get(forKey: key) else {
+                    return BridgeResponse(id: request.id, success: false, result: nil, error: "Key not found")
+                }
                 return BridgeResponse(id: request.id, success: true, result: ["value": value], error: nil)
             case .storageRemove:
                 guard let key = request.payload?["key"] else {
@@ -323,9 +328,10 @@ struct WebViewWrapper: UIViewRepresentable {
         private func sendBridgeResponse(_ response: BridgeResponse) {
             do {
                 let data = try JSONEncoder().encode(response)
-                guard let encoded = String(data: data, encoding: .utf8) else { return }
-                let escaped = encoded.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-                webView?.evaluateJavaScript("window.NativeBridge && window.NativeBridge._handleNativeResponse(\"\(escaped)\");")
+                let base64 = data.base64EncodedString()
+                let jsArgData = try JSONEncoder().encode(base64)
+                guard let jsArg = String(data: jsArgData, encoding: .utf8) else { return }
+                webView?.evaluateJavaScript("window.NativeBridge && window.NativeBridge._handleNativeResponseBase64(\(jsArg));")
             } catch {
                 WebWrapperLogger.error("Bridge response encode failure: \(error.localizedDescription)")
             }
@@ -335,9 +341,10 @@ struct WebViewWrapper: UIViewRepresentable {
             let event = BridgeEvent(name: name, payload: payload)
             do {
                 let data = try JSONEncoder().encode(event)
-                guard let eventText = String(data: data, encoding: .utf8) else { return }
-                let escaped = eventText.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-                webView?.evaluateJavaScript("window.NativeBridge && window.NativeBridge._handleNativeEvent(\"\(escaped)\");")
+                let base64 = data.base64EncodedString()
+                let jsArgData = try JSONEncoder().encode(base64)
+                guard let jsArg = String(data: jsArgData, encoding: .utf8) else { return }
+                webView?.evaluateJavaScript("window.NativeBridge && window.NativeBridge._handleNativeEventBase64(\(jsArg));")
             } catch {
                 WebWrapperLogger.error("Bridge event encode failure: \(error.localizedDescription)")
             }
@@ -354,10 +361,16 @@ struct WebViewWrapper: UIViewRepresentable {
                 try { return JSON.parse(value); } catch { return null; }
               }
 
+              function decodeBase64(value) {
+                try { return atob(value); } catch { return null; }
+              }
+
               window.NativeBridge = {
                 call: function(command, payload) {
                   return new Promise(function(resolve, reject) {
-                    const id = Math.random().toString(36).substring(2);
+                    const id = (globalThis.crypto && globalThis.crypto.randomUUID)
+                      ? globalThis.crypto.randomUUID()
+                      : Math.random().toString(36).substring(2);
                     callbacks[id] = { resolve: resolve, reject: reject };
 
                     setTimeout(function() {
@@ -371,7 +384,9 @@ struct WebViewWrapper: UIViewRepresentable {
                     window.webkit.messageHandlers.\(config.bridgeName).postMessage(message);
                   });
                 },
-                _handleNativeResponse: function(raw) {
+                _handleNativeResponseBase64: function(rawBase64) {
+                  const raw = decodeBase64(rawBase64);
+                  if (!raw) { return; }
                   const response = safeParse(raw);
                   if (!response || !callbacks[response.id]) { return; }
                   if (response.success) {
@@ -381,7 +396,9 @@ struct WebViewWrapper: UIViewRepresentable {
                   }
                   delete callbacks[response.id];
                 },
-                _handleNativeEvent: function(raw) {
+                _handleNativeEventBase64: function(rawBase64) {
+                  const raw = decodeBase64(rawBase64);
+                  if (!raw) { return; }
                   const event = safeParse(raw);
                   if (!event) { return; }
                   window.dispatchEvent(new CustomEvent('nativeBridgeEvent', { detail: event }));
@@ -390,24 +407,36 @@ struct WebViewWrapper: UIViewRepresentable {
             })();
             """
 
-            let script = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+            let script = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
             webView.configuration.userContentController.addUserScript(script)
         }
 
-        private func topViewController(base: UIViewController? = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first(where: { $0.isKeyWindow })?.rootViewController) -> UIViewController? {
-            if let nav = base as? UINavigationController {
+        private func topViewController(base: UIViewController? = nil) -> UIViewController? {
+            let resolvedBase: UIViewController?
+            if let base {
+                resolvedBase = base
+            } else {
+                let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                if #available(iOS 15.0, *) {
+                    resolvedBase = scenes.compactMap { $0.keyWindow }.first?.rootViewController
+                } else {
+                    resolvedBase = scenes
+                        .flatMap { $0.windows }
+                        .first(where: { $0.isKeyWindow })?
+                        .rootViewController
+                }
+            }
+
+            if let nav = resolvedBase as? UINavigationController {
                 return topViewController(base: nav.visibleViewController)
             }
-            if let tab = base as? UITabBarController {
+            if let tab = resolvedBase as? UITabBarController {
                 return topViewController(base: tab.selectedViewController)
             }
-            if let presented = base?.presentedViewController {
+            if let presented = resolvedBase?.presentedViewController {
                 return topViewController(base: presented)
             }
-            return base
+            return resolvedBase
         }
     }
 }

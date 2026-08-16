@@ -19,11 +19,17 @@ final class WebViewStore: ObservableObject {
     @Published var errorMessage: String?
 
     @Published private(set) var commandVersion: Int = 0
-    private(set) var pendingCommand: WebViewCommand?
+    private var pendingCommands: [WebViewCommand] = []
 
     func send(_ command: WebViewCommand) {
-        pendingCommand = command
+        pendingCommands.append(command)
         commandVersion += 1
+    }
+
+    func dequeuePendingCommands() -> [WebViewCommand] {
+        let commands = pendingCommands
+        pendingCommands.removeAll()
+        return commands
     }
 
     func updateNavigationState(currentURL: URL?, canGoBack: Bool, canGoForward: Bool, progress: Double, isLoading: Bool) {

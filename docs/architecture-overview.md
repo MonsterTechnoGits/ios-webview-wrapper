@@ -20,3 +20,7 @@
 3. Web calls `window.NativeBridge.call(...)`.
 4. iOS handler validates origin + command and returns structured response.
 5. Native emits async events via `nativeBridgeEvent` in JS.
+
+## Security Defaults
+- Bridge origin policy is deny-by-default when no origins are configured.
+- Bridge script is injected into the main frame only.

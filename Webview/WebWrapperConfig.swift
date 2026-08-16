@@ -22,7 +22,7 @@ struct WebWrapperConfig {
         javaScriptEnabled: true,
         allowsInlineMediaPlayback: true,
         bridgeName: "iosBridge",
-        allowedBridgeOrigins: [],
+        allowedBridgeOrigins: ["example.com"],
         allowedBridgeCommands: Set(BridgeCommand.allCases)
     )
 
@@ -43,7 +43,7 @@ struct WebWrapperConfig {
 
     func isOriginAllowed(_ origin: String?) -> Bool {
         guard let origin else { return false }
-        if allowedBridgeOrigins.isEmpty { return true }
+        if allowedBridgeOrigins.isEmpty { return false }
         return allowedBridgeOrigins.contains(origin)
     }
 }

@@ -34,6 +34,9 @@ Native dispatches browser event `nativeBridgeEvent` with:
 
 ## Security Controls
 - Command allowlist enforcement.
-- Host/origin allowlist checks.
+- Host/origin allowlist checks (deny by default when `allowedBridgeOrigins` is empty).
 - Domain allow/block policy for navigation.
 - Promise timeout in JS runtime.
+
+## Notes
+- `storage_get` returns an error when the key is missing.

@@ -10,6 +10,7 @@ enum PermissionType: String {
     case location
 }
 
+@MainActor
 final class PermissionManager: NSObject, CLLocationManagerDelegate {
     private var locationContinuation: CheckedContinuation<String, Never>?
     private lazy var locationManager: CLLocationManager = {

@@ -1,10 +1,11 @@
 import SwiftUI
 import UIKit
+import Combine
 
 struct ContentView: View {
     @StateObject private var store = WebViewStore()
-    @StateObject private var deepLinkRouter = DeepLinkRouter()
     @StateObject private var networkMonitor = NetworkMonitor()
+    @State private var previousNetworkConnected: Bool?
 
     private let config = WebWrapperConfig(
         initialURL: URL(string: "https://example.com")!,
@@ -15,7 +16,7 @@ struct ContentView: View {
         javaScriptEnabled: true,
         allowsInlineMediaPlayback: true,
         bridgeName: "iosBridge",
-        allowedBridgeOrigins: [],
+        allowedBridgeOrigins: ["example.com"],
         allowedBridgeCommands: Set(BridgeCommand.allCases)
     )
 
@@ -61,16 +62,14 @@ struct ContentView: View {
             .padding(.vertical, 8)
         }
         .onOpenURL { url in
-            deepLinkRouter.handle(url: url)
-            if let pending = deepLinkRouter.consumePendingURL() {
-                store.send(.load(pending))
-            }
+            store.send(.load(url))
         }
-        .onReceive(networkMonitor.$isConnected) { isConnected in
+        .onReceive(networkMonitor.$isConnected.removeDuplicates()) { isConnected in
             store.send(.emitEvent(name: "network_status", payload: ["connected": isConnected ? "true" : "false"]))
-            if isConnected {
+            if let previous = previousNetworkConnected, !previous, isConnected {
                 store.send(.reload)
             }
+            previousNetworkConnected = isConnected
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             store.send(.emitEvent(name: "app_lifecycle", payload: ["state": "active"]))
